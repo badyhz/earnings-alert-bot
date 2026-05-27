@@ -35,6 +35,34 @@ MOCK_EARNINGS_CALENDAR = [
     },
 ]
 
+# Calendar entry with missing EPS/revenue (like server-side NVDA case)
+MOCK_CALENDAR_SPARSE = [
+    {
+        "date": "2026-05-20",
+        "symbol": "NVDA",
+        "eps": None,
+        "epsEstimated": None,
+        "revenue": None,
+        "revenueEstimated": None,
+        "time": "After Market Close",
+    },
+]
+
+MOCK_EARNINGS_SURPRISES = [
+    {"date": "2026-05-20", "actualEarningResult": 0.82, "estimatedEarning": 0.76},
+    {"date": "2026-02-15", "actualEarningResult": 0.70, "estimatedEarning": 0.65},
+]
+
+MOCK_ANALYST_ESTIMATES = [
+    {"date": "2026-05-20", "estimatedEarningPerShare": 0.76, "estimatedRevenue": 28500000000},
+    {"date": "2026-08-15", "estimatedEarningPerShare": 0.85, "estimatedRevenue": 30000000000},
+]
+
+MOCK_INCOME_STATEMENT = [
+    {"date": "2026-04-30", "revenue": 28000000000, "symbol": "NVDA"},
+    {"date": "2026-01-31", "revenue": 26000000000, "symbol": "NVDA"},
+]
+
 MOCK_QUOTE = [
     {
         "symbol": "MRVL",
@@ -51,11 +79,44 @@ def mock_httpx_get(url, timeout=None):
     if "earnings-calendar" in url:
         resp.status_code = 200
         resp.json.return_value = MOCK_EARNINGS_CALENDAR
+    elif "earnings-surprises" in url:
+        resp.status_code = 200
+        resp.json.return_value = MOCK_EARNINGS_SURPRISES
+    elif "analyst-estimates" in url:
+        resp.status_code = 200
+        resp.json.return_value = MOCK_ANALYST_ESTIMATES
+    elif "income-statement" in url:
+        resp.status_code = 200
+        resp.json.return_value = MOCK_INCOME_STATEMENT
     elif "quote" in url:
         symbol = url.split("/quote/")[1].split("?")[0] if "/quote/" in url else ""
         matching = [q for q in MOCK_QUOTE if q["symbol"] == symbol]
         resp.status_code = 200
         resp.json.return_value = matching if matching else []
+    else:
+        resp.status_code = 404
+        resp.json.return_value = {"Error Message": "not found"}
+    return resp
+
+
+def mock_httpx_get_sparse(url, timeout=None):
+    """Mock that returns sparse calendar + fallback data for NVDA."""
+    resp = MagicMock()
+    if "earnings-calendar" in url:
+        resp.status_code = 200
+        resp.json.return_value = MOCK_CALENDAR_SPARSE
+    elif "earnings-surprises" in url:
+        resp.status_code = 200
+        resp.json.return_value = MOCK_EARNINGS_SURPRISES
+    elif "analyst-estimates" in url:
+        resp.status_code = 200
+        resp.json.return_value = MOCK_ANALYST_ESTIMATES
+    elif "income-statement" in url:
+        resp.status_code = 200
+        resp.json.return_value = MOCK_INCOME_STATEMENT
+    elif "quote" in url:
+        resp.status_code = 200
+        resp.json.return_value = [{"symbol": "NVDA", "price": 130.0, "changesPercentage": 2.5}]
     else:
         resp.status_code = 404
         resp.json.return_value = {"Error Message": "not found"}
@@ -103,7 +164,6 @@ class TestFmpProviderGetEarnings:
 
         assert data is not None
         assert data.ticker == "AAPL"
-        # Verify the first call uses stable endpoint with date range
         first_call_url = mock_get.call_args_list[0][0][0]
         assert "from=" in first_call_url
         assert "to=" in first_call_url
@@ -181,42 +241,144 @@ class TestFmpProviderGetEarnings:
         assert data is None
 
     @patch("providers.fmp_provider.httpx.get", side_effect=mock_httpx_get)
-    def test_missing_optional_fields(self, mock_get):
-        def custom_get(url, timeout=None):
-            if "earnings-calendar" in url:
-                resp = MagicMock()
-                resp.status_code = 200
-                resp.json.return_value = [{
-                    "date": "2026-05-27",
-                    "symbol": "MRVL",
-                    "eps": None,
-                    "epsEstimated": None,
-                    "revenue": None,
-                    "revenueEstimated": None,
-                    "time": None,
-                }]
-                return resp
-            raise httpx.RequestError("no quote")
-
-        mock_get.side_effect = custom_get
-        p = FmpProvider(api_key="test_key")
-        data = p.get_earnings("MRVL")
-
-        assert data is not None
-        assert data.actual_eps is None
-        assert data.consensus_eps is None
-        assert data.actual_revenue is None
-        assert data.consensus_revenue is None
-        assert data.current_price is None
-        assert data.price_move_pct is None
-
-    @patch("providers.fmp_provider.httpx.get", side_effect=mock_httpx_get)
     def test_debug_mode(self, mock_get, capsys):
         p = FmpProvider(api_key="test_key", debug=True)
         data = p.get_earnings("MRVL")
         captured = capsys.readouterr()
         assert "FMP-DEBUG" in captured.err
         assert "Date range" in captured.err
+
+
+class TestFallbackEnrichment:
+    @patch("providers.fmp_provider.httpx.get", side_effect=mock_httpx_get_sparse)
+    def test_sparse_calendar_fills_from_fallbacks(self, mock_get):
+        """NVDA-like case: calendar found but EPS/revenue missing -> fallback fills data."""
+        p = FmpProvider(api_key="test_key")
+        data = p.get_earnings("NVDA")
+
+        assert data is not None
+        assert data.ticker == "NVDA"
+        assert data.earnings_date == "2026-05-20"
+        # actual EPS from earnings-surprises (matching date)
+        assert data.actual_eps == 0.82
+        # consensus EPS from analyst-estimates (matching date)
+        assert data.consensus_eps == 0.76
+        # actual revenue from income-statement (latest quarter, converted to B)
+        assert data.actual_revenue == 28.0
+        # consensus revenue from analyst-estimates (matching date, converted to B)
+        assert data.consensus_revenue == 28.5
+
+    @patch("providers.fmp_provider.httpx.get", side_effect=mock_httpx_get_sparse)
+    def test_fallback_debug_output(self, mock_get, capsys):
+        p = FmpProvider(api_key="test_key", debug=True)
+        data = p.get_earnings("NVDA")
+        captured = capsys.readouterr()
+
+        assert "Fields missing" in captured.err
+        assert "earnings-surprises" in captured.err
+        assert "analyst-estimates" in captured.err
+        assert "income-statement" in captured.err
+        assert "Filled actual EPS" in captured.err
+        assert "Filled consensus EPS" in captured.err
+        assert "Filled consensus revenue" in captured.err
+        assert "Filled actual revenue" in captured.err
+
+    @patch("providers.fmp_provider.httpx.get")
+    def test_fallback_all_fail_gracefully(self, mock_get):
+        """Calendar found, all fallbacks fail -> data has Nones, no crash."""
+        def failing_get(url, timeout=None):
+            resp = MagicMock()
+            if "earnings-calendar" in url:
+                resp.status_code = 200
+                resp.json.return_value = MOCK_CALENDAR_SPARSE
+            else:
+                resp.status_code = 500
+                resp.json.return_value = {"error": "server error"}
+            return resp
+
+        mock_get.side_effect = failing_get
+        p = FmpProvider(api_key="test_key")
+        data = p.get_earnings("NVDA")
+
+        assert data is not None
+        assert data.ticker == "NVDA"
+        assert data.actual_eps is None
+        assert data.consensus_eps is None
+        assert data.actual_revenue is None
+        assert data.consensus_revenue is None
+
+    @patch("providers.fmp_provider.httpx.get")
+    def test_fallback_network_errors_graceful(self, mock_get):
+        """Calendar found, fallbacks throw network errors -> no crash."""
+        call_count = [0]
+        def error_get(url, timeout=None):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                resp = MagicMock()
+                resp.status_code = 200
+                resp.json.return_value = MOCK_CALENDAR_SPARSE
+                return resp
+            raise httpx.RequestError("connection failed")
+
+        mock_get.side_effect = error_get
+        p = FmpProvider(api_key="test_key")
+        data = p.get_earnings("NVDA")
+
+        assert data is not None
+        assert data.actual_eps is None
+
+    @patch("providers.fmp_provider.httpx.get", side_effect=mock_httpx_get)
+    def test_no_fallback_when_data_complete(self, mock_get):
+        """When calendar has full data, no fallback endpoints called."""
+        p = FmpProvider(api_key="test_key")
+        data = p.get_earnings("MRVL")
+
+        assert data is not None
+        assert data.actual_eps == 0.83
+        # Only 2 calls: earnings-calendar + quote (no fallbacks)
+        assert mock_get.call_count == 2
+        urls = [call[0][0] for call in mock_get.call_args_list]
+        assert not any("earnings-surprises" in u for u in urls)
+        assert not any("analyst-estimates" in u for u in urls)
+        assert not any("income-statement" in u for u in urls)
+
+    @patch("providers.fmp_provider.httpx.get", side_effect=mock_httpx_get_sparse)
+    def test_fallback_surprises_no_match_uses_latest(self, mock_get):
+        """When earnings-surprises has no date match, uses latest entry."""
+        def custom_get(url, timeout=None):
+            resp = MagicMock()
+            if "earnings-calendar" in url:
+                resp.status_code = 200
+                resp.json.return_value = [{
+                    "date": "2099-01-01",  # future date not in surprises
+                    "symbol": "NVDA",
+                    "eps": None,
+                    "epsEstimated": None,
+                    "revenue": None,
+                    "revenueEstimated": None,
+                    "time": "After Market Close",
+                }]
+            elif "earnings-surprises" in url:
+                resp.status_code = 200
+                resp.json.return_value = MOCK_EARNINGS_SURPRISES
+            elif "analyst-estimates" in url:
+                resp.status_code = 200
+                resp.json.return_value = [{"date": "2099-01-01", "estimatedEarningPerShare": 0.99, "estimatedRevenue": 30000000000}]
+            elif "income-statement" in url:
+                resp.status_code = 200
+                resp.json.return_value = [{"date": "2099-01-01", "revenue": 29000000000}]
+            else:
+                resp.status_code = 200
+                resp.json.return_value = [{"symbol": "NVDA", "price": 130.0, "changesPercentage": 1.0}]
+            return resp
+
+        mock_get.side_effect = custom_get
+        p = FmpProvider(api_key="test_key")
+        data = p.get_earnings("NVDA")
+
+        assert data is not None
+        # Uses latest from surprises (first entry)
+        assert data.actual_eps == 0.82
 
 
 class TestFmpProviderBatch:
