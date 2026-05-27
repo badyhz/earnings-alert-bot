@@ -81,16 +81,6 @@ class FmpProvider(EarningsProvider):
         self._log(f"No match found for {ticker} in {len(data)} records")
         return None
 
-    def _fetch_earnings_surprises(self, ticker: str) -> Optional[list]:
-        self._log(f"Trying fallback: earnings-surprises for {ticker}")
-        endpoint = f"/earnings-surprises?symbol={ticker}&apikey={self.api_key}"
-        data = self._get_optional(endpoint)
-        if isinstance(data, list) and data:
-            self._log(f"earnings-surprises returned {len(data)} records")
-            return data
-        self._log("earnings-surprises: no data")
-        return None
-
     def _fetch_analyst_estimates(self, ticker: str) -> Optional[list]:
         self._log(f"Trying fallback: analyst-estimates for {ticker}")
         endpoint = f"/analyst-estimates?symbol={ticker}&apikey={self.api_key}"
@@ -111,22 +101,20 @@ class FmpProvider(EarningsProvider):
         self._log("income-statement: no data")
         return None
 
-    def _enrich_from_surprises(self, ticker: str, earnings_date: str, actual_eps: Optional[float]) -> Optional[float]:
+    def _enrich_eps_from_income_statement(self, ticker: str, actual_eps: Optional[float]) -> Optional[float]:
         if actual_eps is not None:
             return actual_eps
-        surprises = self._fetch_earnings_surprises(ticker)
-        if not surprises:
+        self._log("actual EPS fallback: trying income-statement epsdiluted")
+        statements = self._fetch_income_statement(ticker)
+        if not statements:
+            self._log("actual EPS fallback unavailable / unsupported")
             return None
-        for entry in surprises:
-            if entry.get("date") == earnings_date:
-                eps = self._safe_float(entry.get("actualEarningResult"))
-                if eps is not None:
-                    self._log(f"Filled actual EPS from earnings-surprises: {eps}")
-                    return eps
-        latest_eps = self._safe_float(surprises[0].get("actualEarningResult"))
-        if latest_eps is not None:
-            self._log(f"Filled actual EPS from latest earnings-surprises: {latest_eps}")
-        return latest_eps
+        eps = self._safe_float(statements[0].get("epsdiluted"))
+        if eps is not None:
+            self._log(f"Filled actual EPS from income-statement epsdiluted: {eps}")
+            return eps
+        self._log("actual EPS fallback unavailable / unsupported")
+        return None
 
     def _enrich_from_estimates(
         self, ticker: str, earnings_date: str,
@@ -158,7 +146,7 @@ class FmpProvider(EarningsProvider):
                 consensus_revenue = rev_est
         return consensus_eps, consensus_revenue
 
-    def _enrich_from_income_statement(self, ticker: str, actual_revenue: Optional[float]) -> Optional[float]:
+    def _enrich_revenue_from_income_statement(self, ticker: str, actual_revenue: Optional[float]) -> Optional[float]:
         if actual_revenue is not None:
             return actual_revenue
         statements = self._fetch_income_statement(ticker)
@@ -231,14 +219,15 @@ class FmpProvider(EarningsProvider):
         if missing_eps or missing_rev:
             self._log(f"Fields missing (eps={actual_eps}, consensus_eps={consensus_eps}, rev={actual_revenue}, consensus_rev={consensus_revenue}), trying fallbacks...")
 
+            # EPS fallback: income-statement epsdiluted (no earnings-surprises on stable free tier)
             if actual_eps is None:
-                actual_eps = self._enrich_from_surprises(ticker, earnings_date, actual_eps)
+                actual_eps = self._enrich_eps_from_income_statement(ticker, actual_eps)
 
             if consensus_eps is None or consensus_revenue is None:
                 consensus_eps, consensus_revenue = self._enrich_from_estimates(ticker, earnings_date, consensus_eps, consensus_revenue)
 
             if actual_revenue is None:
-                actual_revenue = self._enrich_from_income_statement(ticker, actual_revenue)
+                actual_revenue = self._enrich_revenue_from_income_statement(ticker, actual_revenue)
 
         self._log(f"Final: actual_eps={actual_eps}, consensus_eps={consensus_eps}, actual_revenue={actual_revenue}, consensus_revenue={consensus_revenue}")
 

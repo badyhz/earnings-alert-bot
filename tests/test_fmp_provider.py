@@ -48,19 +48,14 @@ MOCK_CALENDAR_SPARSE = [
     },
 ]
 
-MOCK_EARNINGS_SURPRISES = [
-    {"date": "2026-05-20", "actualEarningResult": 0.82, "estimatedEarning": 0.76},
-    {"date": "2026-02-15", "actualEarningResult": 0.70, "estimatedEarning": 0.65},
-]
-
 MOCK_ANALYST_ESTIMATES = [
     {"date": "2026-05-20", "estimatedEarningPerShare": 0.76, "estimatedRevenue": 28500000000},
     {"date": "2026-08-15", "estimatedEarningPerShare": 0.85, "estimatedRevenue": 30000000000},
 ]
 
 MOCK_INCOME_STATEMENT = [
-    {"date": "2026-04-30", "revenue": 28000000000, "symbol": "NVDA"},
-    {"date": "2026-01-31", "revenue": 26000000000, "symbol": "NVDA"},
+    {"date": "2026-04-30", "revenue": 28000000000, "epsdiluted": 0.82, "symbol": "NVDA"},
+    {"date": "2026-01-31", "revenue": 26000000000, "epsdiluted": 0.70, "symbol": "NVDA"},
 ]
 
 MOCK_QUOTE = [
@@ -79,9 +74,6 @@ def mock_httpx_get(url, timeout=None):
     if "earnings-calendar" in url:
         resp.status_code = 200
         resp.json.return_value = MOCK_EARNINGS_CALENDAR
-    elif "earnings-surprises" in url:
-        resp.status_code = 200
-        resp.json.return_value = MOCK_EARNINGS_SURPRISES
     elif "analyst-estimates" in url:
         resp.status_code = 200
         resp.json.return_value = MOCK_ANALYST_ESTIMATES
@@ -105,9 +97,6 @@ def mock_httpx_get_sparse(url, timeout=None):
     if "earnings-calendar" in url:
         resp.status_code = 200
         resp.json.return_value = MOCK_CALENDAR_SPARSE
-    elif "earnings-surprises" in url:
-        resp.status_code = 200
-        resp.json.return_value = MOCK_EARNINGS_SURPRISES
     elif "analyst-estimates" in url:
         resp.status_code = 200
         resp.json.return_value = MOCK_ANALYST_ESTIMATES
@@ -259,7 +248,7 @@ class TestFallbackEnrichment:
         assert data is not None
         assert data.ticker == "NVDA"
         assert data.earnings_date == "2026-05-20"
-        # actual EPS from earnings-surprises (matching date)
+        # actual EPS from income-statement epsdiluted (latest quarter)
         assert data.actual_eps == 0.82
         # consensus EPS from analyst-estimates (matching date)
         assert data.consensus_eps == 0.76
@@ -275,13 +264,12 @@ class TestFallbackEnrichment:
         captured = capsys.readouterr()
 
         assert "Fields missing" in captured.err
-        assert "earnings-surprises" in captured.err
-        assert "analyst-estimates" in captured.err
         assert "income-statement" in captured.err
-        assert "Filled actual EPS" in captured.err
-        assert "Filled consensus EPS" in captured.err
-        assert "Filled consensus revenue" in captured.err
-        assert "Filled actual revenue" in captured.err
+        assert "analyst-estimates" in captured.err
+        assert "Filled actual EPS from income-statement epsdiluted" in captured.err
+        assert "Filled consensus EPS from analyst-estimates" in captured.err
+        assert "Filled consensus revenue from analyst-estimates" in captured.err
+        assert "Filled actual revenue from income-statement" in captured.err
 
     @patch("providers.fmp_provider.httpx.get")
     def test_fallback_all_fail_gracefully(self, mock_get):
@@ -338,47 +326,65 @@ class TestFallbackEnrichment:
         # Only 2 calls: earnings-calendar + quote (no fallbacks)
         assert mock_get.call_count == 2
         urls = [call[0][0] for call in mock_get.call_args_list]
-        assert not any("earnings-surprises" in u for u in urls)
         assert not any("analyst-estimates" in u for u in urls)
         assert not any("income-statement" in u for u in urls)
 
-    @patch("providers.fmp_provider.httpx.get", side_effect=mock_httpx_get_sparse)
-    def test_fallback_surprises_no_match_uses_latest(self, mock_get):
-        """When earnings-surprises has no date match, uses latest entry."""
+    @patch("providers.fmp_provider.httpx.get")
+    def test_eps_fallback_unavailable_debug(self, mock_get, capsys):
+        """When income-statement has no epsdiluted, debug says fallback unavailable."""
         def custom_get(url, timeout=None):
             resp = MagicMock()
             if "earnings-calendar" in url:
                 resp.status_code = 200
-                resp.json.return_value = [{
-                    "date": "2099-01-01",  # future date not in surprises
-                    "symbol": "NVDA",
-                    "eps": None,
-                    "epsEstimated": None,
-                    "revenue": None,
-                    "revenueEstimated": None,
-                    "time": "After Market Close",
-                }]
-            elif "earnings-surprises" in url:
-                resp.status_code = 200
-                resp.json.return_value = MOCK_EARNINGS_SURPRISES
-            elif "analyst-estimates" in url:
-                resp.status_code = 200
-                resp.json.return_value = [{"date": "2099-01-01", "estimatedEarningPerShare": 0.99, "estimatedRevenue": 30000000000}]
+                resp.json.return_value = MOCK_CALENDAR_SPARSE
             elif "income-statement" in url:
                 resp.status_code = 200
-                resp.json.return_value = [{"date": "2099-01-01", "revenue": 29000000000}]
+                resp.json.return_value = [{"date": "2026-04-30", "revenue": 28000000000}]  # no epsdiluted
+            elif "analyst-estimates" in url:
+                resp.status_code = 200
+                resp.json.return_value = []
             else:
                 resp.status_code = 200
                 resp.json.return_value = [{"symbol": "NVDA", "price": 130.0, "changesPercentage": 1.0}]
             return resp
 
         mock_get.side_effect = custom_get
-        p = FmpProvider(api_key="test_key")
+        p = FmpProvider(api_key="test_key", debug=True)
         data = p.get_earnings("NVDA")
+        captured = capsys.readouterr()
 
         assert data is not None
-        # Uses latest from surprises (first entry)
-        assert data.actual_eps == 0.82
+        assert data.actual_eps is None
+        assert "actual EPS fallback unavailable / unsupported" in captured.err
+
+    @patch("providers.fmp_provider.httpx.get")
+    def test_eps_fallback_404_no_noise(self, mock_get, capsys):
+        """When income-statement returns 404, no raw 404 noise in debug."""
+        def custom_get(url, timeout=None):
+            resp = MagicMock()
+            if "earnings-calendar" in url:
+                resp.status_code = 200
+                resp.json.return_value = MOCK_CALENDAR_SPARSE
+            elif "income-statement" in url:
+                resp.status_code = 404
+                resp.json.return_value = {"error": "not found"}
+            elif "analyst-estimates" in url:
+                resp.status_code = 404
+                resp.json.return_value = {"error": "not found"}
+            else:
+                resp.status_code = 200
+                resp.json.return_value = [{"symbol": "NVDA", "price": 130.0, "changesPercentage": 1.0}]
+            return resp
+
+        mock_get.side_effect = custom_get
+        p = FmpProvider(api_key="test_key", debug=True)
+        data = p.get_earnings("NVDA")
+        captured = capsys.readouterr()
+
+        assert data is not None
+        assert data.actual_eps is None
+        # Should have clean message, not raw HTTP 404 repeated
+        assert "actual EPS fallback unavailable / unsupported" in captured.err
 
 
 class TestFmpProviderBatch:
