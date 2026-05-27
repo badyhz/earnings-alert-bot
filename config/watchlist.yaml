@@ -1,0 +1,15 @@
+tickers:
+  - MRVL
+  - NVDA
+  - AVGO
+  - AMD
+  - CRDO
+  - COHR
+  - LITE
+
+thresholds:
+  eps_surprise_strong_pct: 5
+  revenue_surprise_strong_pct: 3
+  price_move_alert_pct: 5
+  price_move_strong_pct: 10
+  cooldown_hours: 12
