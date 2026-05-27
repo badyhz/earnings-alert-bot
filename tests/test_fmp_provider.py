@@ -48,7 +48,7 @@ MOCK_QUOTE = [
 
 def mock_httpx_get(url, timeout=None):
     resp = MagicMock()
-    if "earning_calendar" in url:
+    if "earnings-calendar" in url:
         resp.status_code = 200
         resp.json.return_value = MOCK_EARNINGS_CALENDAR
     elif "quote" in url:
@@ -103,11 +103,12 @@ class TestFmpProviderGetEarnings:
 
         assert data is not None
         assert data.ticker == "AAPL"
-        # Verify the first call (earning_calendar) contained date range params
+        # Verify the first call uses stable endpoint with date range
         first_call_url = mock_get.call_args_list[0][0][0]
         assert "from=" in first_call_url
         assert "to=" in first_call_url
-        assert "earning_calendar" in first_call_url
+        assert "/stable/earnings-calendar" in first_call_url
+        assert "api/v3/earning_calendar" not in first_call_url
 
     @patch("providers.fmp_provider.httpx.get")
     def test_empty_calendar(self, mock_get):
@@ -182,7 +183,7 @@ class TestFmpProviderGetEarnings:
     @patch("providers.fmp_provider.httpx.get", side_effect=mock_httpx_get)
     def test_missing_optional_fields(self, mock_get):
         def custom_get(url, timeout=None):
-            if "earning_calendar" in url:
+            if "earnings-calendar" in url:
                 resp = MagicMock()
                 resp.status_code = 200
                 resp.json.return_value = [{

@@ -8,6 +8,7 @@ import httpx
 from .base import EarningsData, EarningsProvider
 
 FMP_BASE = "https://financialmodelingprep.com/api/v3"
+FMP_STABLE_BASE = "https://financialmodelingprep.com/stable"
 REQUEST_TIMEOUT = 15.0
 
 
@@ -26,8 +27,8 @@ class FmpProvider(EarningsProvider):
         if self.debug:
             print(f"[FMP-DEBUG] {msg}", file=sys.stderr)
 
-    def _get(self, endpoint: str) -> dict:
-        url = f"{FMP_BASE}{endpoint}"
+    def _get(self, endpoint: str, base: str = FMP_BASE) -> dict:
+        url = f"{base}{endpoint}"
         self._log(f"GET {url[:80]}...")
         try:
             resp = httpx.get(url, timeout=REQUEST_TIMEOUT)
@@ -56,8 +57,8 @@ class FmpProvider(EarningsProvider):
         from_date, to_date = self._date_range()
         self._log(f"Date range: {from_date} to {to_date}")
 
-        endpoint = f"/earning_calendar?from={from_date}&to={to_date}&apikey={self.api_key}"
-        data = self._get(endpoint)
+        endpoint = f"/earnings-calendar?from={from_date}&to={to_date}&apikey={self.api_key}"
+        data = self._get(endpoint, base=FMP_STABLE_BASE)
 
         if not isinstance(data, list):
             self._log(f"Unexpected response type: {type(data)}")

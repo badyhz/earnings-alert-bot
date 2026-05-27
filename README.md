@@ -192,8 +192,9 @@ WantedBy=timers.target
 
 - **Mock provider**: Test data only. Hardcoded sample earnings for MRVL, NVDA, AVGO, AMD, CRDO, COHR, LITE.
 - **FMP provider**: Uses [Financial Modeling Prep](https://financialmodelingprep.com/) API. Requires `FMP_API_KEY`.
-  - Earnings calendar: `/earning_calendar` endpoint. Only returns upcoming/recent earnings, not historical.
-  - Price data: `/quote` endpoint. Regular session price only; no after-hours/pre-market data.
+  - Earnings calendar: `/stable/earnings-calendar` endpoint (migrated from legacy v3). Only returns upcoming/recent earnings, not historical.
+  - Price data: `/api/v3/quote` endpoint. Regular session price only; no after-hours/pre-market data. If v3 becomes legacy, quote fetch fails gracefully and price fields are `None`.
+  - Note: Legacy v3 endpoints (`/api/v3/earning_calendar`) return 403 for new users. This bot uses the stable endpoint.
   - Revenue is returned in raw dollars and auto-converted to billions.
   - `earnings_timing` is parsed from the `time` field ("Before Market Open", "After Market Close").
   - `guidance_revenue_next_q` is not available from FMP and will be `None`.
