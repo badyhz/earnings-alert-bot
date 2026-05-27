@@ -56,12 +56,12 @@ def mark_alert_sent(key: str) -> None:
     save_sent_alerts(alerts)
 
 
-def get_provider(name: str) -> EarningsProvider:
+def get_provider(name: str, debug: bool = False) -> EarningsProvider:
     if name == "mock":
         return MockProvider()
     elif name == "fmp":
         from providers import FmpProvider
-        return FmpProvider()
+        return FmpProvider(debug=debug)
     else:
         raise ValueError(f"Unknown provider: {name}")
 
@@ -112,6 +112,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print only, don't send")
     parser.add_argument("--send", action="store_true", help="Send to Feishu")
     parser.add_argument("--force", action="store_true", help="Ignore cooldown")
+    parser.add_argument("--debug", action="store_true", help="Enable FMP debug output")
     args = parser.parse_args()
 
     if not args.dry_run and not args.send:
@@ -125,7 +126,7 @@ def main():
     thresholds = Thresholds(**raw_thresholds)
 
     try:
-        provider = get_provider(args.provider)
+        provider = get_provider(args.provider, debug=args.debug)
     except (FmpProviderError, ValueError) as e:
         print(f"Error: {e}")
         sys.exit(1)

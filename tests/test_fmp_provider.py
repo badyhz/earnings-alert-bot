@@ -8,14 +8,31 @@ from providers.fmp_provider import FmpProvider, FmpProviderError
 MOCK_EARNINGS_CALENDAR = [
     {
         "date": "2026-05-27",
+        "symbol": "AAPL",
+        "eps": 1.50,
+        "epsEstimated": 1.45,
+        "revenue": 95000000000,
+        "revenueEstimated": 93000000000,
+        "time": "After Market Close",
+    },
+    {
+        "date": "2026-05-28",
+        "symbol": "NVDA",
+        "eps": 6.12,
+        "epsEstimated": 5.58,
+        "revenue": 38200000000,
+        "revenueEstimated": 36000000000,
+        "time": "After Market Close",
+    },
+    {
+        "date": "2026-05-27",
         "symbol": "MRVL",
         "eps": 0.83,
         "epsEstimated": 0.79,
         "revenue": 24700000000,
         "revenueEstimated": 24000000000,
         "time": "After Market Close",
-        "updatedFromDate": "2026-05-27",
-    }
+    },
 ]
 
 MOCK_QUOTE = [
@@ -32,19 +49,13 @@ MOCK_QUOTE = [
 def mock_httpx_get(url, timeout=None):
     resp = MagicMock()
     if "earning_calendar" in url:
-        if "UNKNOWN" in url:
-            resp.status_code = 200
-            resp.json.return_value = []
-        else:
-            resp.status_code = 200
-            resp.json.return_value = MOCK_EARNINGS_CALENDAR
+        resp.status_code = 200
+        resp.json.return_value = MOCK_EARNINGS_CALENDAR
     elif "quote" in url:
-        if "UNKNOWN" in url:
-            resp.status_code = 200
-            resp.json.return_value = []
-        else:
-            resp.status_code = 200
-            resp.json.return_value = MOCK_QUOTE
+        symbol = url.split("/quote/")[1].split("?")[0] if "/quote/" in url else ""
+        matching = [q for q in MOCK_QUOTE if q["symbol"] == symbol]
+        resp.status_code = 200
+        resp.json.return_value = matching if matching else []
     else:
         resp.status_code = 404
         resp.json.return_value = {"Error Message": "not found"}
@@ -85,6 +96,19 @@ class TestFmpProviderGetEarnings:
         data = p.get_earnings("MRVL")
         assert data.earnings_timing == "after_market"
 
+    @patch("providers.fmp_provider.httpx.get", side_effect=mock_httpx_get)
+    def test_date_range_used(self, mock_get):
+        p = FmpProvider(api_key="test_key")
+        data = p.get_earnings("AAPL")
+
+        assert data is not None
+        assert data.ticker == "AAPL"
+        # Verify the first call (earning_calendar) contained date range params
+        first_call_url = mock_get.call_args_list[0][0][0]
+        assert "from=" in first_call_url
+        assert "to=" in first_call_url
+        assert "earning_calendar" in first_call_url
+
     @patch("providers.fmp_provider.httpx.get")
     def test_empty_calendar(self, mock_get):
         resp = MagicMock()
@@ -94,6 +118,17 @@ class TestFmpProviderGetEarnings:
 
         p = FmpProvider(api_key="test_key")
         data = p.get_earnings("UNKNOWN")
+        assert data is None
+
+    @patch("providers.fmp_provider.httpx.get")
+    def test_ticker_not_in_calendar(self, mock_get):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = MOCK_EARNINGS_CALENDAR
+        mock_get.return_value = resp
+
+        p = FmpProvider(api_key="test_key")
+        data = p.get_earnings("TSLA")
         assert data is None
 
     @patch("providers.fmp_provider.httpx.get")
@@ -146,7 +181,6 @@ class TestFmpProviderGetEarnings:
 
     @patch("providers.fmp_provider.httpx.get", side_effect=mock_httpx_get)
     def test_missing_optional_fields(self, mock_get):
-        """Quote fails but earnings calendar works - should still return data."""
         def custom_get(url, timeout=None):
             if "earning_calendar" in url:
                 resp = MagicMock()
@@ -175,6 +209,14 @@ class TestFmpProviderGetEarnings:
         assert data.current_price is None
         assert data.price_move_pct is None
 
+    @patch("providers.fmp_provider.httpx.get", side_effect=mock_httpx_get)
+    def test_debug_mode(self, mock_get, capsys):
+        p = FmpProvider(api_key="test_key", debug=True)
+        data = p.get_earnings("MRVL")
+        captured = capsys.readouterr()
+        assert "FMP-DEBUG" in captured.err
+        assert "Date range" in captured.err
+
 
 class TestFmpProviderBatch:
     @patch("providers.fmp_provider.httpx.get", side_effect=mock_httpx_get)
@@ -183,3 +225,11 @@ class TestFmpProviderBatch:
         results = p.get_earnings_batch(["MRVL", "UNKNOWN"])
         assert len(results) == 1
         assert results[0].ticker == "MRVL"
+
+    @patch("providers.fmp_provider.httpx.get", side_effect=mock_httpx_get)
+    def test_batch_multiple(self, mock_get):
+        p = FmpProvider(api_key="test_key")
+        results = p.get_earnings_batch(["MRVL", "NVDA", "AAPL"])
+        assert len(results) == 3
+        tickers = {r.ticker for r in results}
+        assert tickers == {"MRVL", "NVDA", "AAPL"}

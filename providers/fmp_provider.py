@@ -1,5 +1,6 @@
 import os
-from datetime import datetime
+import sys
+from datetime import datetime, timedelta
 from typing import Optional
 
 import httpx
@@ -7,7 +8,7 @@ import httpx
 from .base import EarningsData, EarningsProvider
 
 FMP_BASE = "https://financialmodelingprep.com/api/v3"
-REQUEST_TIMEOUT = 10.0
+REQUEST_TIMEOUT = 15.0
 
 
 class FmpProviderError(Exception):
@@ -15,13 +16,19 @@ class FmpProviderError(Exception):
 
 
 class FmpProvider(EarningsProvider):
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, debug: bool = False):
         self.api_key = api_key or os.environ.get("FMP_API_KEY", "")
         if not self.api_key:
             raise FmpProviderError("FMP_API_KEY environment variable is required")
+        self.debug = debug
+
+    def _log(self, msg: str):
+        if self.debug:
+            print(f"[FMP-DEBUG] {msg}", file=sys.stderr)
 
     def _get(self, endpoint: str) -> dict:
         url = f"{FMP_BASE}{endpoint}"
+        self._log(f"GET {url[:80]}...")
         try:
             resp = httpx.get(url, timeout=REQUEST_TIMEOUT)
         except httpx.TimeoutException:
@@ -39,11 +46,32 @@ class FmpProvider(EarningsProvider):
 
         return data
 
+    def _date_range(self) -> tuple[str, str]:
+        today = datetime.now().date()
+        from_date = (today - timedelta(days=14)).isoformat()
+        to_date = (today + timedelta(days=30)).isoformat()
+        return from_date, to_date
+
     def _fetch_earnings_calendar(self, ticker: str) -> Optional[dict]:
-        data = self._get(f"/earning_calendar?symbol={ticker}&apikey={self.api_key}")
-        if not isinstance(data, list) or not data:
+        from_date, to_date = self._date_range()
+        self._log(f"Date range: {from_date} to {to_date}")
+
+        endpoint = f"/earning_calendar?from={from_date}&to={to_date}&apikey={self.api_key}"
+        data = self._get(endpoint)
+
+        if not isinstance(data, list):
+            self._log(f"Unexpected response type: {type(data)}")
             return None
-        return data[0]
+
+        self._log(f"Calendar records returned: {len(data)}")
+
+        for entry in data:
+            if entry.get("symbol", "").upper() == ticker.upper():
+                self._log(f"Found match: {entry.get('symbol')} on {entry.get('date')}")
+                return entry
+
+        self._log(f"No match found for {ticker} in {len(data)} records")
+        return None
 
     def _fetch_quote(self, ticker: str) -> Optional[dict]:
         data = self._get(f"/quote/{ticker}?apikey={self.api_key}")
@@ -63,7 +91,7 @@ class FmpProvider(EarningsProvider):
         if not time_str:
             return "unknown"
         time_str = str(time_str).lower()
-        if "before" in time_str or "amc" not in time_str and "bmo" in time_str:
+        if "before" in time_str or "bmo" in time_str:
             return "before_market"
         if "after" in time_str or "amc" in time_str:
             return "after_market"
@@ -106,8 +134,6 @@ class FmpProvider(EarningsProvider):
             quote = self._fetch_quote(ticker)
             if quote:
                 current_price = self._safe_float(quote.get("price"))
-                # FMP doesn't provide after-hours move directly
-                # Use day change as approximation
                 price_move_pct = self._safe_float(quote.get("changesPercentage"))
                 if price_move_pct is not None:
                     price_move_pct = round(price_move_pct, 2)
